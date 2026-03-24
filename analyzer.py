@@ -10,3 +10,16 @@ def count_protocols(packets):
         else:
             counts["Other"] += 1
     return counts
+
+def print_results(counts):
+    total = sum(counts.values())
+    print(f"{Protocol':<10} {'Count':<10} {'Percent'}"
+    print("-" *30)
+
+for protocol, count in counts.items():
+          percent = count / total * 100 if total > 0 else 0
+    print(f"{proto:<10} {'Count':<10} {'Percent: .1f}%")
+          
+          packets = rdpcap("http.cap")
+    counts =count_protocols(packets)
+    print_results(counts)
