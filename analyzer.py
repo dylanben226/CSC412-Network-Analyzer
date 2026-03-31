@@ -1,3 +1,5 @@
+from scapy.all import rdpcap
+
 def count_protocols(packets):
     counts = {"TCP": 0, "UDP": 0, "ICMP": 0, "Other": 0}
     for packet in packets:
@@ -13,13 +15,12 @@ def count_protocols(packets):
 
 def print_results(counts):
     total = sum(counts.values())
-    print(f"{Protocol':<10} {'Count':<10} {'Percent'}"
-    print("-" *30)
+    print(f"{'Protocol':<10} {'Count':<10} {'Percent'}")
+    print("-" * 30)
+    for protocol, count in counts.items():
+        percent = count / total * 100 if total > 0 else 0
+        print(f"{protocol:<10} {count:<10} {percent:.1f}%")
 
-for protocol, count in counts.items():
-          percent = count / total * 100 if total > 0 else 0
-    print(f"{proto:<10} {'Count':<10} {'Percent: .1f}%")
-          
-          packets = rdpcap("http.cap")
-    counts =count_protocols(packets)
-    print_results(counts)
+packets = rdpcap("http.cap")
+counts = count_protocols(packets)
+print_results(counts)
