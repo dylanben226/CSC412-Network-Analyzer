@@ -1,26 +1,70 @@
 from scapy.all import rdpcap
 
-def count_protocols(packets):
-    counts = {"TCP": 0, "UDP": 0, "ICMP": 0, "Other": 0}
-    for packet in packets:
-        if packet.haslayer("TCP"):
-            counts["TCP"] += 1
-        elif packet.haslayer("UDP"):
-            counts["UDP"] += 1
-        elif packet.haslayer("ICMP"):
-            counts["ICMP"] += 1
-        else:
-            counts["Other"] += 1
-    return counts
+files = {
+    "Browsing (http.cap)": "http.cap",
+    "ICMP/Ping (icmp.pcap)": "icmp.pcap",
+    "Idle/DNS (dns.cap)": "dns.cap"
+}
 
-def print_results(counts):
-    total = sum(counts.values())
+for scenario, filename in files.items():
+    try:
+        packets = rdpcap(filename)
+    except FileNotFoundError:
+        print(f"\n[ERROR] File not found: {filename} — skipping.")
+        continue
+
+    tcp = udp = icmp = other = 0
+    bad_packets = 0
+
+    for pkt in packets:
+        try:
+            if pkt.haslayer("TCP"):
+                tcp += 1
+            elif pkt.haslayer("UDP"):
+                udp += 1
+            elif pkt.haslayer("ICMP"):
+                icmp += 1
+            else:
+                other += 1
+        except Exception:
+            bad_packets += 1
+
+    total = len(packets)
+    print(f"\n--- {scenario} ---")
     print(f"{'Protocol':<10} {'Count':<10} {'Percent'}")
-    print("-" * 30)
-    for protocol, count in counts.items():
-        percent = count / total * 100 if total > 0 else 0
-        print(f"{protocol:<10} {count:<10} {percent:.1f}%")
+    print(f"{'TCP':<10} {tcp:<10} {tcp/total*100:.1f}%")
+    print(f"{'UDP':<10} {udp:<10} {udp/total*100:.1f}%")
+    print(f"{'ICMP':<10} {icmp:<10} {icmp/total*100:.1f}%")
+    print(f"{'Other':<10} {other:<10} {other/total*100:.1f}%")
+    if bad_packets > 0:
+        print(f"[!] Skipped {bad_packets} malformed packet(s)")
 
-packets = rdpcap("http.cap")
-counts = count_protocols(packets)
-print_results(counts)
+print("\n\n========== WEEK 5: STRESS TEST ==========")
+
+try:
+    stress_packets = rdpcap("icmp.pcap")
+    icmp_count = 0
+    bad_count = 0
+
+    for pkt in stress_packets:
+        try:
+            if pkt.haslayer("ICMP"):
+                icmp_count += 1
+        except Exception:
+            bad_count += 1
+
+    total_stress = len(stress_packets)
+    print(f"Total packets processed : {total_stress}")
+    print(f"ICMP packets detected   : {icmp_count}")
+    print(f"ICMP spike percentage   : {icmp_count/total_stress*100:.1f}%")
+    print(f"Malformed packets skipped: {bad_count}")
+
+    if icmp_count / total_stress > 0.70:
+        print("\n[!] SPIKE DETECTED: ICMP traffic exceeds 70% — possible ping flood!")
+    else:
+        print("\n[OK] No spike detected. Traffic looks normal.")
+
+except FileNotFoundError:
+    print("[ERROR] icmp.pcap not found.")
+
+print("\n[PASS] Script completed without crashing — error handling works.")
