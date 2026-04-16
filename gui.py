@@ -1,661 +1,444 @@
 import tkinter as tk
+from tkinter import ttk
 import math
-import threading
-import random
 
-try:
-    from analyzer import get_protocol_data
-    LIVE_DATA = True
-except ImportError:
-    LIVE_DATA = False
-
-FALLBACK_DATA = {
-    "TCP": [80, 10, 10],
-    "UDP": [10, 10, 80],
-    "ICMP": [10, 80, 10]
+# ── DATA ──────────────────────────────────────────────────────────────────────
+scenarios = ["Browsing\n(http.cap)", "Ping Flood\n(icmp.pcap)", "Idle/DNS\n(dns.cap)"]
+data = {
+    "TCP":  [80, 10, 10],
+    "UDP":  [10, 10, 80],
+    "ICMP": [10, 80, 10],
+}
+COLORS = {
+    "TCP":  "#378ADD",
+    "UDP":  "#639922",
+    "ICMP": "#E24B4A",
+    "bg":   "#0F1117",
+    "card": "#1A1D27",
+    "grid": "#23263A",
+    "text": "#E8EAF0",
+    "muted":"#6B7280",
 }
 
-C = {
-    "bg":      "#07090F",
-    "panel":   "#0D1117",
-    "card":    "#111520",
-    "border":  "#1E2535",
-    "TCP":     "#00C2FF",
-    "UDP":     "#00E887",
-    "ICMP":    "#FF4560",
-    "text":    "#E8EDF5",
-    "muted":   "#4A5568",
-    "bright":  "#FFFFFF",
-    "warn":    "#FFB020",
-    "accent":  "#7C3AED",
-}
-
-scenarios = ["Browsing\n(http.cap)", "Ping Flood\n(icmp.pcap)", "Idle / DNS\n(dns.cap)"]
-scenario_names = ["Browsing", "Ping Flood", "Idle / DNS"]
-
-
-# ── COLOR HELPERS ─────────────────────────────────────────────────────────────
-def hex_to_rgb(hex_color):
-    hex_color = hex_color.lstrip("#")
-    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-
-def rgb_to_hex(rgb):
-    return "#{:02X}{:02X}{:02X}".format(*rgb)
-
-def blend(c1, c2, t=0.5):
-    """
-    Blend c1 toward c2 by fraction t.
-    t=0 => c1
-    t=1 => c2
-    """
-    r1, g1, b1 = hex_to_rgb(c1)
-    r2, g2, b2 = hex_to_rgb(c2)
-    r = round(r1 + (r2 - r1) * t)
-    g = round(g1 + (g2 - g1) * t)
-    b = round(b1 + (b2 - b1) * t)
-    return rgb_to_hex((r, g, b))
-
-
+# ── ROOT ──────────────────────────────────────────────────────────────────────
 root = tk.Tk()
 root.title("CSC412 — Network Traffic Analyzer")
-root.geometry("1100x800")
-root.configure(bg=C["bg"])
+root.geometry("1000x720")
+root.configure(bg=COLORS["bg"])
 root.resizable(False, False)
 
-data = dict(FALLBACK_DATA)
-active_filter = tk.StringVar(value="All")
-active_chart = tk.StringVar(value="Bar")
-spike_active = False
-timeline_data = []
-timeline_job = None
-anim_vals = {"TCP": [0, 0, 0], "UDP": [0, 0, 0], "ICMP": [0, 0, 0]}
-anim_job = None
-filter_btns = {}
-chart_btns = {}
+# ── STATE ─────────────────────────────────────────────────────────────────────
+active_filter   = tk.StringVar(value="All")
+active_chart    = tk.StringVar(value="Bar")
+scenario_idx    = tk.IntVar(value=-1)
+spike_active    = False
+timeline_data   = []
+timeline_job    = None
+filter_buttons  = {}
+chart_buttons   = {}
 
-# ── CANVAS BACKGROUND ─────────────────────────────────────────────────────────
-bg_canvas = tk.Canvas(root, width=1100, height=800, bg=C["bg"], highlightthickness=0)
-bg_canvas.place(x=0, y=0)
+# ── HELPERS ───────────────────────────────────────────────────────────────────
+def hex_to_rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
 
-def draw_bg():
-    bg_canvas.delete("grid")
-    for x in range(0, 1100, 60):
-        bg_canvas.create_line(x, 0, x, 800, fill="#0E1420", tags="grid")
-    for y in range(0, 800, 60):
-        bg_canvas.create_line(0, y, 1100, y, fill="#0E1420", tags="grid")
-    for _ in range(18):
-        x, y = random.randint(0, 1100), random.randint(0, 800)
-        r = random.randint(1, 3)
-        col = random.choice([C["TCP"], C["UDP"], C["ICMP"], C["accent"]])
-        bg_canvas.create_oval(x-r, y-r, x+r, y+r, fill=col, outline="", tags="grid")
+def blend(hex1, hex2, t):
+    r1,g1,b1 = hex_to_rgb(hex1)
+    r2,g2,b2 = hex_to_rgb(hex2)
+    r = int(r1 + (r2-r1)*t)
+    g = int(g1 + (g2-g1)*t)
+    b = int(b1 + (b2-b1)*t)
+    return f"#{r:02x}{g:02x}{b:02x}"
 
-draw_bg()
+def dim(color): return blend(color, COLORS["bg"], 0.60)
 
-def make_frame(parent, **kw):
-    f = tk.Frame(parent, bg=C["card"], bd=0,
-                 highlightthickness=1, highlightbackground=C["border"])
-    for k, v in kw.items():
-        f.configure(**{k: v})
-    return f
+# ── LAYOUT ────────────────────────────────────────────────────────────────────
+# Header
+hdr = tk.Frame(root, bg=COLORS["bg"])
+hdr.pack(fill="x", padx=20, pady=(16, 0))
 
-# ── HEADER ────────────────────────────────────────────────────────────────────
-hdr = tk.Frame(root, bg=C["bg"])
-hdr.place(x=20, y=14, width=1060)
+tk.Label(hdr, text="Network Traffic Analyzer",
+         font=("Courier", 20, "bold"), bg=COLORS["bg"], fg=COLORS["text"]).pack(side="left")
 
-title_frame = tk.Frame(hdr, bg=C["bg"])
-title_frame.pack(side="left")
+status_frame = tk.Frame(hdr, bg="#1E2535", bd=0, highlightthickness=1,
+                        highlightbackground="#2A3050")
+status_frame.pack(side="right", pady=4)
+status_dot = tk.Label(status_frame, text="●", font=("Arial", 10),
+                      bg="#1E2535", fg="#22C55E")
+status_dot.pack(side="left", padx=(8,2), pady=4)
+status_label = tk.Label(status_frame, text="Monitoring",
+                        font=("Courier", 10), bg="#1E2535", fg="#22C55E")
+status_label.pack(side="left", padx=(0,10), pady=4)
 
-tk.Label(
-    title_frame,
-    text="◈ NETWORK TRAFFIC ANALYZER",
-    font=("Courier", 18, "bold"),
-    bg=C["bg"],
-    fg=C["bright"]
-).pack(anchor="w")
-
-tk.Label(
-    title_frame,
-    text="CSC412  ·  Team J & D Unlimited  ·  Jack Ngog & Dylan Ben  ·  Weeks 1–6",
-    font=("Courier", 9),
-    bg=C["bg"],
-    fg=C["muted"]
-).pack(anchor="w")
-
-status_box = tk.Frame(hdr, bg="#0A1A0A", highlightthickness=1, highlightbackground="#1A4A1A")
-status_box.pack(side="right", pady=4)
-
-pulse_dot = tk.Label(status_box, text="●", font=("Courier", 12), bg="#0A1A0A", fg="#00E887")
-pulse_dot.pack(side="left", padx=(10, 4), pady=6)
-
-status_lbl = tk.Label(status_box, text="LIVE", font=("Courier", 10, "bold"), bg="#0A1A0A", fg="#00E887")
-status_lbl.pack(side="left", padx=(0, 12), pady=6)
-
-pulse_on = True
-def pulse_status():
-    global pulse_on
-    if not spike_active:
-        pulse_on = not pulse_on
-        pulse_dot.config(fg="#00E887" if pulse_on else "#004422")
-        root.after(800, pulse_status)
-
-pulse_status()
+tk.Label(root, text="CSC412 · Week 4 & 5 packet capture analysis",
+         font=("Courier", 10), bg=COLORS["bg"], fg=COLORS["muted"]).pack(anchor="w", padx=20)
 
 # ── METRIC CARDS ──────────────────────────────────────────────────────────────
-metrics_row = tk.Frame(root, bg=C["bg"])
-metrics_row.place(x=20, y=72, width=1060)
+metrics_frame = tk.Frame(root, bg=COLORS["bg"])
+metrics_frame.pack(fill="x", padx=20, pady=(14,0))
 
-metric_refs = {}
-card_defs = [
-    ("TOTAL PACKETS", "—", "loading...", C["TCP"]),
-    ("DOMINANT", "—", "loading...", C["UDP"]),
-    ("ANOMALY SCORE", "0%", "no spike", C["ICMP"]),
-    ("SCENARIOS", "3", "files analyzed", C["accent"]),
-]
-
-for i, (lbl, val, sub, accent) in enumerate(card_defs):
-    card = tk.Frame(metrics_row, bg=C["card"], highlightthickness=1, highlightbackground=C["border"])
-    card.grid(row=0, column=i, padx=(0, 10) if i < 3 else 0, sticky="ew")
-    metrics_row.columnconfigure(i, weight=1)
-
-    tk.Frame(card, bg=accent, height=2).pack(fill="x")
-    tk.Label(card, text=lbl, font=("Courier", 8, "bold"), bg=C["card"], fg=C["muted"]).pack(anchor="w", padx=12, pady=(8, 0))
-    vl = tk.Label(card, text=val, font=("Courier", 20, "bold"), bg=C["card"], fg=accent)
+metric_vals = {}
+for i, (lbl, val, sub) in enumerate([
+    ("Total Packets", "900", "across 3 captures"),
+    ("Dominant Protocol", "TCP", "Browsing scenario"),
+    ("Anomaly Score", "0%", "No spike detected"),
+]):
+    card = tk.Frame(metrics_frame, bg=COLORS["card"], bd=0,
+                    highlightthickness=1, highlightbackground=COLORS["grid"])
+    card.grid(row=0, column=i, padx=(0,10) if i<2 else 0, sticky="ew")
+    metrics_frame.columnconfigure(i, weight=1)
+    tk.Label(card, text=lbl, font=("Courier", 9), bg=COLORS["card"],
+             fg=COLORS["muted"]).pack(anchor="w", padx=12, pady=(10,0))
+    vl = tk.Label(card, text=val, font=("Courier", 18, "bold"),
+                  bg=COLORS["card"], fg=COLORS["text"])
     vl.pack(anchor="w", padx=12)
-    sl = tk.Label(card, text=sub, font=("Courier", 9), bg=C["card"], fg=C["muted"])
-    sl.pack(anchor="w", padx=12, pady=(0, 10))
-    metric_refs[lbl] = (vl, sl, accent)
+    sl = tk.Label(card, text=sub, font=("Courier", 9),
+                  bg=COLORS["card"], fg=COLORS["muted"])
+    sl.pack(anchor="w", padx=12, pady=(0,10))
+    metric_vals[lbl] = (vl, sl)
 
-# ── CONTROLS ──────────────────────────────────────────────────────────────────
-ctrl = tk.Frame(root, bg=C["bg"])
-ctrl.place(x=20, y=172, width=1060)
+# ── CONTROLS ROW ──────────────────────────────────────────────────────────────
+ctrl = tk.Frame(root, bg=COLORS["bg"])
+ctrl.pack(fill="x", padx=20, pady=(14,0))
 
-def pill(parent, text, on_click, active=False, accent=C["TCP"]):
-    bg = blend(C["card"], accent, 0.22) if active else C["card"]
-    fg = accent if active else C["muted"]
-    border = accent if active else C["border"]
-    active_bg = blend(C["card"], accent, 0.15)
+tk.Label(ctrl, text="FILTER", font=("Courier", 9, "bold"),
+         bg=COLORS["bg"], fg=COLORS["muted"]).pack(side="left", padx=(0,8))
 
-    b = tk.Button(
-        parent,
-        text=text,
-        font=("Courier", 10, "bold"),
-        bg=bg,
-        fg=fg,
-        relief="flat",
-        bd=0,
-        padx=14,
-        pady=6,
-        cursor="hand2",
-        highlightthickness=1,
-        highlightbackground=border,
-        activebackground=active_bg,
-        activeforeground=accent,
-        command=on_click
-    )
-    return b
-
-tk.Label(ctrl, text="FILTER ▸", font=("Courier", 9, "bold"), bg=C["bg"], fg=C["muted"]).pack(side="left", padx=(0, 8))
-
-for mode, acc in [("All", C["bright"]), ("TCP", C["TCP"]), ("UDP", C["UDP"]), ("ICMP", C["ICMP"])]:
-    def _set(m=mode):
-        set_filter(m)
-    b = pill(ctrl, mode, _set, mode == "All", acc)
-    b.pack(side="left", padx=(0, 5))
-    filter_btns[mode] = b
-
-tk.Label(ctrl, text="   CHART ▸", font=("Courier", 9, "bold"), bg=C["bg"], fg=C["muted"]).pack(side="left", padx=(10, 8))
-
-for ct in ["Bar", "Radar", "Donut"]:
-    def _set(c=ct):
-        set_chart(c)
-    b = pill(ctrl, ct, _set, ct == "Bar", C["accent"])
-    b.pack(side="left", padx=(0, 5))
-    chart_btns[ct] = b
-
-# ── MAIN CHART CANVAS ─────────────────────────────────────────────────────────
-chart_outer = make_frame(root)
-chart_outer.place(x=20, y=210, width=760, height=300)
-
-tk.Frame(chart_outer, bg=C["TCP"], height=2).pack(fill="x")
-chart_canvas = tk.Canvas(chart_outer, width=756, height=292, bg=C["card"], highlightthickness=0)
-chart_canvas.pack(padx=2, pady=2)
-
-tip = tk.Label(
-    root,
-    text="",
-    bg="#1A2035",
-    fg=C["bright"],
-    font=("Courier", 10, "bold"),
-    padx=10,
-    pady=5,
-    highlightthickness=1,
-    highlightbackground=C["border"]
-)
-
-def tip_enter(e, txt):
-    tip.place(
-        x=min(e.x_root - root.winfo_x() + 12, 900),
-        y=e.y_root - root.winfo_y() - 44
-    )
-    tip.config(text=txt)
-
-def tip_leave(e):
-    tip.place_forget()
-
-# ── CHARTS ────────────────────────────────────────────────────────────────────
-def draw_bar_chart(use_anim=True):
-    chart_canvas.delete("all")
-    W, H, pl, pb = 756, 292, 60, 44
-    ch = H - pb - 14
-    vals = anim_vals if use_anim else data
-
-    for pct in [0, 25, 50, 75, 100]:
-        y = H - pb - int((pct / 100) * ch)
-        chart_canvas.create_line(pl, y, W - 8, y, fill=C["border"], dash=(3, 5))
-        chart_canvas.create_text(pl - 6, y, text=f"{pct}%", fill=C["muted"], font=("Courier", 8), anchor="e")
-
-    protos = ["TCP", "UDP", "ICMP"] if active_filter.get() == "All" else [active_filter.get()]
-    n = len(scenarios)
-    gw = (W - pl - 8) / n
-    bw = min(30, gw / (len(protos) + 1))
-    gap = bw * 0.4
-
-    for i, scen in enumerate(scenarios):
-        gx = pl + i * gw + gw / 2 - (len(protos) * (bw + gap)) / 2
-        for j, proto in enumerate(protos):
-            v = vals[proto][i]
-            h = int((v / 100) * ch)
-            x0 = gx + j * (bw + gap)
-            x1 = x0 + bw
-            y0 = H - pb - h
-            y1 = H - pb
-            col = C[proto]
-
-            shadow_col = blend(C["card"], col, 0.25)
-            shine_col = blend(col, C["bright"], 0.35)
-
-            chart_canvas.create_rectangle(x0, y0 + 4, x1, y1, fill=shadow_col, outline="")
-            chart_canvas.create_rectangle(x0 + 2, y0 + 4, x1 - 2, y1, fill=col, outline="")
-            chart_canvas.create_rectangle(x0 + 2, y0 + 4, x1 - 2, min(y0 + 10, y1), fill=shine_col, outline="")
-
-            rid = chart_canvas.create_rectangle(x0, y0, x1, y1, fill="", outline=col, width=1)
-            chart_canvas.create_text((x0 + x1) / 2, y0 - 9, text=f"{int(v)}%", fill=col, font=("Courier", 8, "bold"))
-
-            chart_canvas.tag_bind(
-                rid,
-                "<Enter>",
-                lambda e, p=proto, vv=int(v), s=scen.replace("\n", " "): tip_enter(e, f" {p}: {vv}%  {s} ")
-            )
-            chart_canvas.tag_bind(rid, "<Leave>", tip_leave)
-
-        chart_canvas.create_text(
-            pl + i * gw + gw / 2,
-            H - pb + 14,
-            text=scen,
-            fill=C["muted"],
-            font=("Courier", 8, "bold"),
-            justify="center"
-        )
-
-    lx = pl + 4
-    for p in ["TCP", "UDP", "ICMP"]:
-        chart_canvas.create_rectangle(lx, 8, lx + 10, 18, fill=C[p], outline="")
-        chart_canvas.create_text(lx + 14, 13, text=p, fill=C[p], font=("Courier", 9, "bold"), anchor="w")
-        lx += 56
-
-def draw_radar_chart():
-    chart_canvas.delete("all")
-    W, H = 756, 292
-    cx, cy, r = W // 2, H // 2 - 10, 95
-    protos = ["TCP", "UDP", "ICMP"] if active_filter.get() == "All" else [active_filter.get()]
-    n = len(scenarios)
-
-    for ring in [25, 50, 75, 100]:
-        pts = []
-        for k in range(n):
-            ang = math.pi / 2 - 2 * math.pi * k / n
-            rr = r * (ring / 100)
-            pts += [cx + rr * math.cos(ang), cy - rr * math.sin(ang)]
-        chart_canvas.create_polygon(pts, outline=C["border"], fill="", width=1)
-
-    for k, scen in enumerate(scenarios):
-        ang = math.pi / 2 - 2 * math.pi * k / n
-        chart_canvas.create_line(cx, cy, cx + r * math.cos(ang), cy - r * math.sin(ang), fill=C["border"])
-        chart_canvas.create_text(
-            cx + (r + 28) * math.cos(ang),
-            cy - (r + 28) * math.sin(ang),
-            text=scen.replace("\n", " "),
-            fill=C["muted"],
-            font=("Courier", 8, "bold"),
-            justify="center"
-        )
-
-    for proto in protos:
-        pts = []
-        for k in range(n):
-            ang = math.pi / 2 - 2 * math.pi * k / n
-            rr = r * (data[proto][k] / 100)
-            pts += [cx + rr * math.cos(ang), cy - rr * math.sin(ang)]
-        fill_col = blend(C["card"], C[proto], 0.18)
-        chart_canvas.create_polygon(pts, outline=C[proto], fill=fill_col, width=2)
-
-        for k in range(n):
-            ang = math.pi / 2 - 2 * math.pi * k / n
-            rr = r * (data[proto][k] / 100)
-            px2, py2 = cx + rr * math.cos(ang), cy - rr * math.sin(ang)
-            chart_canvas.create_oval(px2 - 5, py2 - 5, px2 + 5, py2 + 5, fill=C[proto], outline=C["bg"], width=2)
-            chart_canvas.create_text(px2, py2 - 14, text=f"{int(data[proto][k])}%", fill=C[proto], font=("Courier", 7, "bold"))
-
-    lx = 10
-    for p in (["TCP", "UDP", "ICMP"] if active_filter.get() == "All" else [active_filter.get()]):
-        chart_canvas.create_rectangle(lx, 8, lx + 10, 18, fill=C[p], outline="")
-        chart_canvas.create_text(lx + 14, 13, text=p, fill=C[p], font=("Courier", 9, "bold"), anchor="w")
-        lx += 56
-
-def draw_donut_chart():
-    chart_canvas.delete("all")
-    W, H = 756, 292
-    cx, cy = 160, H // 2
-    r_out, r_in = 95, 48
-    protos = ["TCP", "UDP", "ICMP"] if active_filter.get() == "All" else [active_filter.get()]
-    totals = {p: sum(data[p]) for p in protos}
-    grand = sum(totals.values()) or 1
-    start = 90.0
-
-    for proto in protos:
-        extent = -360 * totals[proto] / grand
-        soft_col = blend(C["card"], C[proto], 0.3)
-
-        chart_canvas.create_arc(
-            cx - r_out, cy - r_out, cx + r_out, cy + r_out,
-            start=start, extent=extent,
-            fill=soft_col, outline=C["card"], width=3, style="pieslice"
-        )
-        chart_canvas.create_arc(
-            cx - r_out + 4, cy - r_out + 4, cx + r_out - 4, cy + r_out - 4,
-            start=start, extent=extent,
-            fill=C[proto], outline=""
-        )
-
-        mid = math.radians(-(start + extent / 2))
-        mx = cx + (r_out + r_in) / 2 * math.cos(mid)
-        my = cy + (r_out + r_in) / 2 * math.sin(mid)
-        pct = int(totals[proto] / grand * 100)
-        chart_canvas.create_text(mx, my, text=f"{pct}%", fill=C["bright"], font=("Courier", 9, "bold"))
-        start += extent
-
-    chart_canvas.create_oval(cx - r_in, cy - r_in, cx + r_in, cy + r_in, fill=C["card"], outline=C["border"], width=1)
-    chart_canvas.create_text(cx, cy - 8, text=str(grand), fill=C["bright"], font=("Courier", 18, "bold"))
-    chart_canvas.create_text(cx, cy + 12, text="pkts", fill=C["muted"], font=("Courier", 9))
-
-    tx = cx + r_out + 40
-    y = 40
-    for proto in ["TCP", "UDP", "ICMP"]:
-        chart_canvas.create_rectangle(tx, y, tx + 12, y + 12, fill=C[proto], outline="")
-        row = f"  {proto}   " + "  ".join(f"{data[proto][j]}%" for j in range(3))
-        chart_canvas.create_text(tx + 16, y + 6, text=row, fill=C[proto], font=("Courier", 10, "bold"), anchor="w")
-        y += 36
-
-    chart_canvas.create_text(tx + 16, 20, text="       Browse  PingFlood  DNS", fill=C["muted"], font=("Courier", 9), anchor="w")
-
-def draw_chart(use_anim=True):
-    t = active_chart.get()
-    if t == "Bar":
-        draw_bar_chart(use_anim)
-    elif t == "Radar":
-        draw_radar_chart()
-    elif t == "Donut":
-        draw_donut_chart()
-
-# ── BAR ANIMATION ─────────────────────────────────────────────────────────────
-anim_step = [0]
-
-def animate_bars():
-    global anim_job
-    step = anim_step[0]
-    total_steps = 20
-
-    if step <= total_steps:
-        t = step / total_steps
-        ease = 1 - (1 - t) ** 3
-        for proto in ["TCP", "UDP", "ICMP"]:
-            for i in range(3):
-                anim_vals[proto][i] = data[proto][i] * ease
-
-        if active_chart.get() == "Bar":
-            draw_bar_chart(use_anim=True)
-
-        anim_step[0] += 1
-        anim_job = root.after(18, animate_bars)
-
-def trigger_animation():
-    anim_step[0] = 0
-    animate_bars()
-
-# ── BREAKDOWN PANEL ───────────────────────────────────────────────────────────
-breakdown_outer = make_frame(root)
-breakdown_outer.place(x=796, y=210, width=284, height=300)
-tk.Frame(breakdown_outer, bg=C["UDP"], height=2).pack(fill="x")
-
-tk.Label(breakdown_outer, text="BREAKDOWN", font=("Courier", 9, "bold"), bg=C["card"], fg=C["muted"]).pack(anchor="w", padx=12, pady=(8, 4))
-
-bk_canvas = tk.Canvas(breakdown_outer, bg=C["card"], highlightthickness=0, width=280, height=260)
-bk_canvas.pack(fill="both", expand=True, padx=4)
-
-def draw_breakdown():
-    bk_canvas.delete("all")
-    labels = ["Browsing", "Ping Flood", "Idle/DNS"]
-    row_h = 80
-
-    for si, slabel in enumerate(labels):
-        y = si * row_h + 4
-        bk_canvas.create_text(10, y + 8, text=slabel, fill=C["bright"], font=("Courier", 9, "bold"), anchor="w")
-
-        for pi, proto in enumerate(["TCP", "UDP", "ICMP"]):
-            by = y + 24 + pi * 16
-            val = data[proto][si]
-            bk_canvas.create_text(10, by + 5, text=proto, fill=C[proto], font=("Courier", 8, "bold"), anchor="w")
-            bk_canvas.create_rectangle(42, by + 1, 220, by + 9, fill=C["border"], outline="")
-
-            fw = int(178 * val / 100)
-            if fw > 0:
-                bk_canvas.create_rectangle(42, by + 1, 42 + fw, by + 9, fill=C[proto], outline="")
-                shine = blend(C[proto], C["bright"], 0.3)
-                bk_canvas.create_rectangle(42, by + 1, 42 + fw, by + 4, fill=shine, outline="")
-
-            bk_canvas.create_text(228, by + 5, text=f"{int(val)}%", fill=C[proto], font=("Courier", 8, "bold"), anchor="w")
-
-        if si < 2:
-            bk_canvas.create_line(4, y + row_h - 2, 276, y + row_h - 2, fill=C["border"])
-
-draw_breakdown()
-
-# ── TIMELINE PANEL ────────────────────────────────────────────────────────────
-tl_outer = make_frame(root)
-tl_outer.place(x=20, y=524, width=1060, height=130)
-tk.Frame(tl_outer, bg=C["ICMP"], height=2).pack(fill="x")
-
-tl_header = tk.Frame(tl_outer, bg=C["card"])
-tl_header.pack(fill="x", padx=12, pady=(6, 0))
-
-tk.Label(tl_header, text="ICMP TIMELINE", font=("Courier", 9, "bold"), bg=C["card"], fg=C["muted"]).pack(side="left")
-tl_status = tk.Label(tl_header, text="waiting for stress test...", font=("Courier", 8), bg=C["card"], fg=C["muted"])
-tl_status.pack(side="right")
-
-tl_canvas = tk.Canvas(tl_outer, width=1056, height=88, bg=C["card"], highlightthickness=0)
-tl_canvas.pack(padx=2, pady=(0, 4))
-
-def draw_timeline():
-    tl_canvas.delete("all")
-    W, H, pl, pr, pt, pb = 1056, 88, 40, 16, 10, 20
-    cw, ch = W - pl - pr, H - pt - pb
-
-    for pct in [0, 35, 70, 100]:
-        y = H - pb - int((pct / 100) * ch)
-        tl_canvas.create_line(pl, y, W - pr, y, fill=C["border"], dash=(2, 4))
-        tl_canvas.create_text(pl - 4, y, text=f"{pct}%", fill=C["muted"], font=("Courier", 7), anchor="e")
-
-    threshold_y = H - pb - int((70 / 100) * ch)
-    tl_canvas.create_line(pl, threshold_y, W - pr, threshold_y, fill=blend(C["card"], C["ICMP"], 0.55), dash=(6, 3), width=1)
-    tl_canvas.create_text(W - pr + 2, threshold_y, text="70%", fill=C["ICMP"], font=("Courier", 7), anchor="w")
-
-    if len(timeline_data) < 2:
-        tl_canvas.create_text(W // 2, H // 2, text="◈  Run Simulate Stress Test to see live timeline", fill=C["muted"], font=("Courier", 9))
-        return
-
-    n = len(timeline_data)
-    pts = []
-    for i, v in enumerate(timeline_data):
-        x = pl + i * (cw / max(n - 1, 1))
-        y = H - pb - int((v / 100) * ch)
-        pts.append((x, y))
-
-    fill_pts = [(pl, H - pb)] + pts + [(pts[-1][0], H - pb)]
-    flat = [c for p in fill_pts for c in p]
-    tl_canvas.create_polygon(flat, fill=blend(C["card"], C["ICMP"], 0.18), outline="")
-
-    for i in range(len(pts) - 1):
-        x1, y1 = pts[i]
-        x2, y2 = pts[i + 1]
-        v = timeline_data[i + 1]
-        col = C["ICMP"] if v >= 70 else C["UDP"]
-        tl_canvas.create_line(x1, y1, x2, y2, fill=col, width=2, smooth=True)
-
-    if pts:
-        lx, ly = pts[-1]
-        tl_canvas.create_oval(lx - 5, ly - 5, lx + 5, ly + 5, fill=C["ICMP"], outline=C["bg"], width=2)
-
-draw_timeline()
-
-# ── ACTION BUTTONS ────────────────────────────────────────────────────────────
-actions = tk.Frame(root, bg=C["bg"])
-actions.place(x=20, y=670, width=1060)
-
-def action_btn(parent, text, cmd, bg, fg, border):
-    return tk.Button(
-        parent,
-        text=text,
-        command=cmd,
-        font=("Courier", 10, "bold"),
-        bg=bg,
-        fg=fg,
-        relief="flat",
-        bd=0,
-        padx=16,
-        pady=8,
-        cursor="hand2",
-        highlightthickness=1,
-        highlightbackground=border,
-        activebackground=bg,
-        activeforeground=fg
-    )
-
-reload_btn = action_btn(actions, "⟳  RELOAD DATA", lambda: reload_live_data(), "#081830", C["TCP"], "#1A4060")
-reload_btn.pack(side="left", padx=(0, 8))
-
-spike_btn = action_btn(actions, "⚡  SIMULATE STRESS TEST", lambda: simulate_spike(), "#1A0808", C["ICMP"], "#4A1515")
-spike_btn.pack(side="left", padx=(0, 8))
-
-reset_btn = action_btn(actions, "↺  RESET", lambda: reset_all(), C["card"], C["muted"], C["border"])
-reset_btn.pack(side="left")
-
-# ── FOOTER ────────────────────────────────────────────────────────────────────
-tk.Frame(root, bg=C["border"], height=1).place(x=20, y=740, width=1060)
-
-footer = tk.Frame(root, bg=C["bg"])
-footer.place(x=20, y=748, width=1060)
-
-tk.Label(
-    footer,
-    text="◈ J & D Unlimited  ·  CSC412  ·  Python + Scapy + Tkinter",
-    font=("Courier", 9),
-    bg=C["bg"],
-    fg=C["muted"]
-).pack(side="left")
-
-alert_lbl = tk.Label(footer, text="", font=("Courier", 9), bg=C["bg"], fg=C["muted"])
-alert_lbl.pack(side="right")
-
-# ── FILTER / CHART SETTERS ────────────────────────────────────────────────────
 def set_filter(f):
     active_filter.set(f)
-    accs = {
-        "All": C["bright"],
-        "TCP": C["TCP"],
-        "UDP": C["UDP"],
-        "ICMP": C["ICMP"]
-    }
-
-    for k, b in filter_btns.items():
-        acc = accs[k]
-        on = (k == f)
-        b.config(
-            bg=blend(C["card"], acc, 0.22) if on else C["card"],
-            fg=acc if on else C["muted"],
-            highlightbackground=acc if on else C["border"],
-            activebackground=blend(C["card"], acc, 0.15)
-        )
-
+    for k,b in filter_buttons.items():
+        if k == f:
+            b.config(bg=COLORS.get(k, "#2A3050"), fg=COLORS["text"],
+                     highlightbackground=COLORS.get(k, "#4A5070"))
+        else:
+            b.config(bg=COLORS["card"], fg=COLORS["muted"],
+                     highlightbackground=COLORS["grid"])
     draw_chart()
+    update_metrics()
+
+for mode in ["All", "TCP", "UDP", "ICMP"]:
+    col = COLORS.get(mode, "#2A3050")
+    b = tk.Button(ctrl, text=mode, font=("Courier", 10, "bold"),
+                  bg=COLORS["card"] if mode != "All" else "#2A3050",
+                  fg=COLORS["text"] if mode == "All" else COLORS["muted"],
+                  relief="flat", bd=0, padx=12, pady=5, cursor="hand2",
+                  highlightthickness=1,
+                  highlightbackground=COLORS["grid"] if mode != "All" else "#4A5070",
+                  command=lambda m=mode: set_filter(m))
+    b.pack(side="left", padx=(0,6))
+    filter_buttons[mode] = b
+
+tk.Label(ctrl, text="  CHART", font=("Courier", 9, "bold"),
+         bg=COLORS["bg"], fg=COLORS["muted"]).pack(side="left", padx=(12,8))
 
 def set_chart(c):
     active_chart.set(c)
-    for k, b in chart_btns.items():
-        on = (k == c)
-        b.config(
-            bg=blend(C["card"], C["accent"], 0.22) if on else C["card"],
-            fg=C["accent"] if on else C["muted"],
-            highlightbackground=C["accent"] if on else C["border"],
-            activebackground=blend(C["card"], C["accent"], 0.15)
-        )
+    for k,b in chart_buttons.items():
+        b.config(bg="#2A3050" if k==c else COLORS["card"],
+                 fg=COLORS["text"] if k==c else COLORS["muted"],
+                 highlightbackground="#4A5070" if k==c else COLORS["grid"])
+    draw_chart()
 
-    if c == "Bar":
-        trigger_animation()
-    else:
-        draw_chart()
+for ct in ["Bar", "Radar", "Donut"]:
+    b = tk.Button(ctrl, text=ct, font=("Courier", 10),
+                  bg=COLORS["card"], fg=COLORS["muted"],
+                  relief="flat", bd=0, padx=10, pady=5, cursor="hand2",
+                  highlightthickness=1, highlightbackground=COLORS["grid"],
+                  command=lambda c=ct: set_chart(c))
+    b.pack(side="left", padx=(0,6))
+    chart_buttons[ct] = b
 
-# ── UPDATE METRICS ────────────────────────────────────────────────────────────
+# Mark defaults active
+filter_buttons["All"].config(bg="#2A3050", fg=COLORS["text"], highlightbackground="#4A5070")
+chart_buttons["Bar"].config(bg="#2A3050", fg=COLORS["text"], highlightbackground="#4A5070")
+
+# ── MAIN CHART CANVAS ─────────────────────────────────────────────────────────
+chart_frame = tk.Frame(root, bg=COLORS["card"], bd=0,
+                       highlightthickness=1, highlightbackground=COLORS["grid"])
+chart_frame.pack(fill="x", padx=20, pady=(12,0))
+
+canvas = tk.Canvas(chart_frame, width=960, height=260,
+                   bg=COLORS["card"], highlightthickness=0)
+canvas.pack(padx=12, pady=12)
+
+tooltip = tk.Label(root, text="", bg="#2A3050", fg=COLORS["text"],
+                   font=("Courier", 10, "bold"), padx=8, pady=4,
+                   relief="flat", bd=0, highlightthickness=1,
+                   highlightbackground="#4A5070")
+
+def on_enter(e, proto, val, scenario):
+    tooltip.place(x=e.x_root - root.winfo_x() + 10,
+                  y=e.y_root - root.winfo_y() - 40)
+    tooltip.config(text=f"  {proto}: {val}%  |  {scenario}  ")
+
+def on_leave(e):
+    tooltip.place_forget()
+
+def draw_bar_chart():
+    canvas.delete("all")
+    W, H, pad_l, pad_b = 960, 260, 55, 40
+    chart_h = H - pad_b - 10
+
+    # Grid lines
+    for pct in [0, 25, 50, 75, 100]:
+        y = H - pad_b - int((pct/100)*chart_h)
+        canvas.create_line(pad_l, y, W-10, y, fill=COLORS["grid"], dash=(4,4))
+        canvas.create_text(pad_l-8, y, text=f"{pct}%",
+                           fill=COLORS["muted"], font=("Courier", 8), anchor="e")
+
+    protos = ["TCP","UDP","ICMP"] if active_filter.get()=="All" else [active_filter.get()]
+    n_scen = len(scenarios)
+    group_w = (W - pad_l - 10) / n_scen
+    bar_w = min(28, group_w / (len(protos)+1))
+    gap   = bar_w * 0.35
+
+    for i, scen in enumerate(scenarios):
+        gx = pad_l + i * group_w + group_w/2 - (len(protos)*(bar_w+gap))/2
+        for j, proto in enumerate(protos):
+            val = data[proto][i]
+            h   = int((val/100)*chart_h)
+            x0  = gx + j*(bar_w+gap)
+            x1  = x0 + bar_w
+            y0  = H - pad_b - h
+            y1  = H - pad_b
+            # Rounded top
+            rid = canvas.create_rectangle(x0, y0+6, x1, y1, fill=COLORS[proto], outline="")
+            canvas.create_arc(x0, y0, x1, y0+12, start=0, extent=180,
+                              fill=COLORS[proto], outline="")
+            # Value label
+            canvas.create_text((x0+x1)/2, y0-8, text=f"{val}%",
+                                fill=COLORS[proto], font=("Courier", 8, "bold"))
+            for item in [rid]:
+                canvas.tag_bind(item, "<Enter>",
+                                lambda e, p=proto, v=val, s=scen.replace("\n"," "): on_enter(e,p,v,s))
+                canvas.tag_bind(item, "<Leave>", on_leave)
+
+        label = scen.replace("\n", "\n")
+        canvas.create_text(pad_l + i*group_w + group_w/2, H - pad_b + 14,
+                           text=scen, fill=COLORS["muted"],
+                           font=("Courier", 9, "bold"), justify="center")
+
+    # Legend
+    lx = pad_l
+    protos_all = ["TCP","UDP","ICMP"]
+    for p in protos_all:
+        canvas.create_rectangle(lx, 8, lx+10, 18, fill=COLORS[p], outline="")
+        canvas.create_text(lx+14, 13, text=p, fill=COLORS["muted"],
+                           font=("Courier", 9), anchor="w")
+        lx += 60
+
+def draw_radar_chart():
+    canvas.delete("all")
+    W, H = 960, 260
+    cx, cy, r = W//2, H//2, 90
+    protos = ["TCP","UDP","ICMP"] if active_filter.get()=="All" else [active_filter.get()]
+    n = len(scenarios)
+
+    # Rings
+    for pct in [25,50,75,100]:
+        pts = []
+        for k in range(n):
+            ang = math.pi/2 - 2*math.pi*k/n
+            rr = r*(pct/100)
+            pts += [cx + rr*math.cos(ang), cy - rr*math.sin(ang)]
+        canvas.create_polygon(pts, outline=COLORS["grid"], fill="", width=1)
+        canvas.create_text(cx + r*(pct/100)*math.cos(math.pi/2),
+                           cy - r*(pct/100)*math.sin(math.pi/2) - 6,
+                           text=f"{pct}%", fill=COLORS["muted"], font=("Courier", 7))
+
+    # Axes & labels
+    for k, scen in enumerate(scenarios):
+        ang = math.pi/2 - 2*math.pi*k/n
+        canvas.create_line(cx, cy, cx+r*math.cos(ang), cy-r*math.sin(ang),
+                           fill=COLORS["grid"])
+        canvas.create_text(cx+(r+24)*math.cos(ang), cy-(r+24)*math.sin(ang),
+                           text=scen.replace("\n"," "), fill=COLORS["muted"],
+                           font=("Courier", 8), justify="center")
+
+    for proto in protos:
+        pts = []
+        for k in range(n):
+            ang = math.pi/2 - 2*math.pi*k/n
+            rr = r*(data[proto][k]/100)
+            pts += [cx+rr*math.cos(ang), cy-rr*math.sin(ang)]
+        canvas.create_polygon(pts, outline=COLORS[proto], fill=dim(COLORS[proto]), width=2)
+        for k in range(n):
+            ang = math.pi/2 - 2*math.pi*k/n
+            rr = r*(data[proto][k]/100)
+            px, py = cx+rr*math.cos(ang), cy-rr*math.sin(ang)
+            canvas.create_oval(px-4,py-4,px+4,py+4, fill=COLORS[proto], outline="")
+
+    # Legend
+    lx = 20
+    for p in (["TCP","UDP","ICMP"] if active_filter.get()=="All" else [active_filter.get()]):
+        canvas.create_rectangle(lx,8,lx+10,18,fill=COLORS[p],outline="")
+        canvas.create_text(lx+14,13,text=p,fill=COLORS["muted"],
+                           font=("Courier",9),anchor="w")
+        lx += 60
+
+def draw_donut_chart():
+    canvas.delete("all")
+    W, H = 960, 260
+    cx, cy, r_out, r_in = 200, H//2, 90, 45
+    protos = ["TCP","UDP","ICMP"] if active_filter.get()=="All" else [active_filter.get()]
+    totals = {p: sum(data[p]) for p in protos}
+    grand  = sum(totals.values())
+
+    start = 0.0
+    for proto in protos:
+        extent = 360 * totals[proto] / grand
+        canvas.create_arc(cx-r_out, cy-r_out, cx+r_out, cy+r_out,
+                          start=start, extent=extent,
+                          fill=COLORS[proto], outline=COLORS["card"], width=2)
+        canvas.create_oval(cx-r_in, cy-r_in, cx+r_in, cy+r_in,
+                           fill=COLORS["card"], outline="")
+        mid = math.radians(start + extent/2)
+        mx  = cx + (r_out+r_in)/2 * math.cos(mid)
+        my  = cy - (r_out+r_in)/2 * math.sin(mid)
+        pct = int(totals[proto]/grand*100)
+        canvas.create_text(mx, my, text=f"{pct}%", fill=COLORS["text"],
+                           font=("Courier", 9, "bold"))
+        start += extent
+
+    canvas.create_text(cx, cy, text=f"{grand}", fill=COLORS["text"],
+                       font=("Courier", 16, "bold"))
+    canvas.create_text(cx, cy+16, text="pkts", fill=COLORS["muted"],
+                       font=("Courier", 9))
+
+    # Table on right
+    tx = cx + r_out + 60
+    canvas.create_text(tx, 30, text="Protocol  Browse  PingFlood  DNS",
+                       fill=COLORS["muted"], font=("Courier", 9), anchor="w")
+    for i, (scen_label, col) in enumerate(zip(
+            ["Browse","PingFlood","DNS"], ["TCP","UDP","ICMP"])):
+        pass
+    for i, proto in enumerate(["TCP","UDP","ICMP"]):
+        y = 55 + i*36
+        canvas.create_rectangle(tx, y+2, tx+10, y+12,
+                                 fill=COLORS[proto], outline="")
+        row = f"  {proto:<6}" + "".join(f"   {data[proto][j]:>3}%" for j in range(3))
+        canvas.create_text(tx+14, y+7, text=row,
+                           fill=COLORS[proto], font=("Courier", 10, "bold"), anchor="w")
+
+def draw_chart():
+    t = active_chart.get()
+    if   t == "Bar":   draw_bar_chart()
+    elif t == "Radar": draw_radar_chart()
+    elif t == "Donut": draw_donut_chart()
+
+# ── BREAKDOWN MINI-BARS ───────────────────────────────────────────────────────
+breakdown_frame = tk.Frame(root, bg=COLORS["bg"])
+breakdown_frame.pack(fill="x", padx=20, pady=(12,0))
+
+scenario_labels = ["Browsing (http.cap)", "Ping Flood (icmp.pcap)", "Idle/DNS (dns.cap)"]
+breakdown_bars  = {}   # (scenario_idx, proto) -> canvas item
+
+for si, slabel in enumerate(scenario_labels):
+    card = tk.Frame(breakdown_frame, bg=COLORS["card"], bd=0,
+                    highlightthickness=1, highlightbackground=COLORS["grid"])
+    card.grid(row=0, column=si, padx=(0,10) if si<2 else 0, sticky="ew")
+    breakdown_frame.columnconfigure(si, weight=1)
+    tk.Label(card, text=slabel, font=("Courier", 9, "bold"),
+             bg=COLORS["card"], fg=COLORS["text"]).pack(anchor="w", padx=10, pady=(8,4))
+    for proto in ["TCP","UDP","ICMP"]:
+        row = tk.Frame(card, bg=COLORS["card"])
+        row.pack(fill="x", padx=10, pady=2)
+        tk.Label(row, text=proto, width=5, font=("Courier", 8),
+                 bg=COLORS["card"], fg=COLORS[proto], anchor="w").pack(side="left")
+        track = tk.Frame(row, bg=COLORS["grid"], height=5)
+        track.pack(side="left", fill="x", expand=True, padx=(0,6))
+        track.pack_propagate(False)
+        fill_bar = tk.Frame(track, bg=COLORS[proto], height=5)
+        fill_bar.place(relwidth=data[proto][si]/100, relheight=1)
+        val_lbl = tk.Label(row, text=f"{data[proto][si]}%",
+                           font=("Courier", 8, "bold"),
+                           bg=COLORS["card"], fg=COLORS[proto])
+        val_lbl.pack(side="right")
+    tk.Frame(card, bg=COLORS["card"], height=6).pack()
+
+# ── ALERT / TIMELINE ──────────────────────────────────────────────────────────
+alert_frame = tk.Frame(root, bg=COLORS["bg"])
+alert_frame.pack(fill="x", padx=20, pady=(10,0))
+
+alert_label = tk.Label(alert_frame, text="",
+                        font=("Courier", 10), bg=COLORS["bg"], fg=COLORS["muted"])
+alert_label.pack(side="left")
+
+timeline_frame = tk.Frame(root, bg=COLORS["card"], bd=0,
+                          highlightthickness=1, highlightbackground=COLORS["grid"])
+tl_canvas = tk.Canvas(timeline_frame, width=960, height=80,
+                      bg=COLORS["card"], highlightthickness=0)
+tl_canvas.pack(padx=8, pady=8)
+
+# ── ACTION BUTTONS ────────────────────────────────────────────────────────────
+action_frame = tk.Frame(root, bg=COLORS["bg"])
+action_frame.pack(fill="x", padx=20, pady=(10,0))
+
 def update_metrics():
-    protos = ["TCP", "UDP", "ICMP"]
+    protos = ["TCP","UDP","ICMP"] if active_filter.get()=="All" else [active_filter.get()]
     best, bestv = "", 0
-
     for p in protos:
-        avg = sum(data[p]) / 3
+        avg = sum(data[p])/3
         if avg > bestv:
             bestv, best = avg, p
-
     si = data[best].index(max(data[best]))
-    metric_refs["DOMINANT"][0].config(text=best, fg=C[best])
-    metric_refs["DOMINANT"][1].config(text=scenario_names[si])
+    names = ["Browsing","Ping Flood","Idle/DNS"]
+    metric_vals["Dominant Protocol"][0].config(text=best)
+    metric_vals["Dominant Protocol"][1].config(text=f"{names[si]} scenario")
 
-# ── SPIKE SIMULATION ──────────────────────────────────────────────────────────
-spike_seq = [4, 7, 5, 11, 38, 62, 80, 79, 81, 72, 61, 44, 28, 14, 4]
-spike_step_var = [0]
+def clear_spike():
+    global spike_active, timeline_job
+    spike_active = False
+    timeline_data.clear()
+    tl_canvas.delete("all")
+    timeline_frame.pack_forget()
+    alert_label.config(text="", fg=COLORS["muted"])
+    status_label.config(text="Monitoring", fg="#22C55E")
+    status_dot.config(fg="#22C55E")
+    metric_vals["Anomaly Score"][0].config(text="0%", fg=COLORS["text"])
+    metric_vals["Anomaly Score"][1].config(text="No spike detected")
+
+def draw_timeline():
+    tl_canvas.delete("all")
+    W, H = 960, 80
+    pad = 30
+    if len(timeline_data) < 2:
+        return
+    mx = max(timeline_data)
+    pts = []
+    for i, v in enumerate(timeline_data):
+        x = pad + i * (W - 2*pad) / max(len(timeline_data)-1, 1)
+        y = H - pad - int((v/100)*(H-2*pad))
+        pts += [x, y]
+    if len(pts) >= 4:
+        tl_canvas.create_line(*pts, fill=COLORS["ICMP"], width=2, smooth=True)
+    # threshold
+    ty = H - pad - int((70/100)*(H-2*pad))
+    tl_canvas.create_line(pad, ty, W-pad, ty,
+                          fill="#E24B4A", dash=(6,4), width=1)
+    tl_canvas.create_text(W-pad+2, ty, text="70%",
+                           fill="#E24B4A", font=("Courier",7), anchor="w")
+    tl_canvas.create_text(pad, 8, text="ICMP live timeline",
+                           fill=COLORS["muted"], font=("Courier",8), anchor="w")
+
+spike_sequence = [5,8,6,12,40,65,80,78,80,70,60,45,30,15,5]
+spike_step     = tk.IntVar(value=0)
 
 def tick_spike():
     global timeline_job
-    idx = spike_step_var[0]
-
-    if idx < len(spike_seq):
-        val = spike_seq[idx]
+    idx = spike_step.get()
+    if idx < len(spike_sequence):
+        val = spike_sequence[idx]
         timeline_data.append(val)
         draw_timeline()
-
-        tl_status.config(
-            text=f"ICMP: {val}%  {'▲ SPIKE DETECTED' if val >= 70 else '▼ normalizing'}",
-            fg=C["ICMP"] if val >= 70 else C["UDP"]
-        )
-
-        metric_refs["ANOMALY SCORE"][0].config(text=f"{val}%", fg=C["ICMP"] if val >= 70 else C["text"])
-        metric_refs["ANOMALY SCORE"][1].config(text="PING FLOOD DETECTED!" if val >= 70 else "returning to normal")
-
-        if val >= 70:
-            status_lbl.config(text="ALERT", fg=C["ICMP"])
-            pulse_dot.config(fg=C["ICMP"])
-            alert_lbl.config(text="[!] ICMP SPIKE — Possible Ping Flood Attack  ", fg=C["ICMP"])
-
-        spike_step_var[0] += 1
-        timeline_job = root.after(380, tick_spike)
+        pct = val
+        metric_vals["Anomaly Score"][0].config(
+            text=f"{pct}%",
+            fg="#E24B4A" if pct>=70 else COLORS["text"])
+        metric_vals["Anomaly Score"][1].config(
+            text="CRITICAL — ping flood!" if pct>=70 else "Returning to normal")
+        spike_step.set(idx+1)
+        timeline_job = root.after(400, tick_spike)
     else:
         root.after(2000, clear_spike)
 
@@ -664,77 +447,74 @@ def simulate_spike():
     if spike_active:
         return
     spike_active = True
-    spike_step_var[0] = 0
+    spike_step.set(0)
     timeline_data.clear()
+    timeline_frame.pack(fill="x", padx=20, pady=(8,0))
+    status_label.config(text="ICMP SPIKE DETECTED", fg="#EF4444")
+    status_dot.config(fg="#EF4444")
+    alert_label.config(
+        text="  ⚠  CRITICAL: ICMP Spike 80% — Potential Ping Flood Attack",
+        fg="#E24B4A")
     tick_spike()
 
-def clear_spike():
-    global spike_active, timeline_job
-    spike_active = False
-    timeline_data.clear()
-    draw_timeline()
-    tl_status.config(text="waiting for stress test...", fg=C["muted"])
-    status_lbl.config(text="LIVE", fg=C["UDP"])
-    pulse_dot.config(fg=C["UDP"])
-    alert_lbl.config(text="[PASS] Error handling active — script never crashed  ", fg=C["UDP"])
-    metric_refs["ANOMALY SCORE"][0].config(text="0%", fg=C["text"])
-    metric_refs["ANOMALY SCORE"][1].config(text="no spike")
-    pulse_status()
+def cycle_scenario():
+    idx = (scenario_idx.get() + 1) % 3
+    scenario_idx.set(idx)
+    names = ["Browsing","Ping Flood","Idle/DNS"]
+    metric_vals["Dominant Protocol"][0].config(text=names[idx])
+    metric_vals["Dominant Protocol"][1].config(text=scenario_labels[idx])
+    if active_chart.get() == "Bar":
+        draw_bar_highlight(idx)
 
-# ── LIVE DATA LOADER ──────────────────────────────────────────────────────────
-def reload_live_data():
-    status_lbl.config(text="LOADING", fg=C["warn"])
-    pulse_dot.config(fg=C["warn"])
-    alert_lbl.config(text="", fg=C["muted"])
+def draw_bar_highlight(hi):
+    draw_bar_chart()
+    # Slight re-tint not needed — already bright colors per bar
 
-    def _load():
-        global data
-        try:
-            live = get_protocol_data()
-            data = live
-            root.after(0, _done, True)
-        except Exception:
-            root.after(0, _done, False)
-
-    def _done(ok):
-        global data
-        if ok:
-            total = sum(sum(v) for v in data.values()) // 3
-            metric_refs["TOTAL PACKETS"][0].config(text=str(total))
-            metric_refs["TOTAL PACKETS"][1].config(text="from 3 PCAP files")
-            alert_lbl.config(text="[PASS] Live data loaded from analyzer.py  ", fg=C["UDP"])
-            status_lbl.config(text="LIVE", fg=C["UDP"])
-            pulse_dot.config(fg=C["UDP"])
-        else:
-            data = dict(FALLBACK_DATA)
-            metric_refs["TOTAL PACKETS"][0].config(text="300")
-            metric_refs["TOTAL PACKETS"][1].config(text="demo fallback")
-            alert_lbl.config(text="[!] PCAP files not found — using demo data  ", fg=C["warn"])
-            status_lbl.config(text="DEMO", fg=C["warn"])
-            pulse_dot.config(fg=C["warn"])
-
-        update_metrics()
-        draw_breakdown()
-        trigger_animation()
-
-    threading.Thread(target=_load, daemon=True).start()
-
-# ── RESET ─────────────────────────────────────────────────────────────────────
 def reset_all():
     global spike_active
     if timeline_job:
         root.after_cancel(timeline_job)
     spike_active = False
+    scenario_idx.set(-1)
     timeline_data.clear()
     active_filter.set("All")
     active_chart.set("Bar")
-    set_filter("All")
-    set_chart("Bar")
+    for k,b in filter_buttons.items():
+        is_all = k=="All"
+        b.config(bg="#2A3050" if is_all else COLORS["card"],
+                 fg=COLORS["text"] if is_all else COLORS["muted"],
+                 highlightbackground="#4A5070" if is_all else COLORS["grid"])
+    for k,b in chart_buttons.items():
+        is_bar = k=="Bar"
+        b.config(bg="#2A3050" if is_bar else COLORS["card"],
+                 fg=COLORS["text"] if is_bar else COLORS["muted"],
+                 highlightbackground="#4A5070" if is_bar else COLORS["grid"])
     clear_spike()
+    draw_chart()
+    update_metrics()
+
+btn_style = dict(font=("Courier",10,"bold"), relief="flat", bd=0,
+                 padx=14, pady=7, cursor="hand2", highlightthickness=1)
+
+tk.Button(action_frame, text="⚡  Simulate Week 5 Stress Test",
+          command=simulate_spike,
+          bg="#3D1515", fg="#E24B4A",
+          highlightbackground="#6B2222",
+          **btn_style).pack(side="left", padx=(0,8))
+
+tk.Button(action_frame, text="↻  Cycle Scenario",
+          command=cycle_scenario,
+          bg="#1A2535", fg="#378ADD",
+          highlightbackground="#2A4060",
+          **btn_style).pack(side="left", padx=(0,8))
+
+tk.Button(action_frame, text="Reset",
+          command=reset_all,
+          bg=COLORS["card"], fg=COLORS["muted"],
+          highlightbackground=COLORS["grid"],
+          **btn_style).pack(side="left")
 
 # ── INIT ──────────────────────────────────────────────────────────────────────
+draw_chart()
 update_metrics()
-draw_timeline()
-root.after(400, reload_live_data)
-
 root.mainloop()
